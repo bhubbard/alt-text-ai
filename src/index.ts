@@ -98,8 +98,8 @@ app.post('/describe', async (c) => {
     ];
 
     const aiResponse = await c.env.AI.run(
-      // @ts-ignore - Model ID not yet in types
-      '@cf/meta/llama-3.2-90b-vision-instruct',
+      // @ts-ignore - We know that the AI binding exists / BETA
+      '@cf/meta/llama-3.2-11b-vision-instruct',
       {
         messages,
         image: Array.from(new Uint8Array(imgBuffer)),
