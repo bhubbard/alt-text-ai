@@ -3,9 +3,10 @@
 Generate SEO-optimized metadata (alt text, captions, filenames) for images using Cloudflare’s AI. Upload images or provide image URLs, and receive structured JSON or text responses in multiple languages.
 
 ## Features
-- **Comprehensive Metadata**: Generates `alt-text`, `caption`, `description`, `focus-keyword`, and SEO-friendly `filename`.
-- **Formats Supported**: JPG, PNG, GIF, WEBP, **AVIF**.
+- **Comprehensive Metadata**: Generates `alt-text`, `caption`, `description`, `focus-keyword`, `tags`, and SEO-friendly `filename`.
+- **Formats Supported**: JPG, PNG, GIF, WEBP, **AVIF**, **SVG**, **BMP**.
 - **Languages**: English, German, French, Italian, Portuguese, Hindi, Spanish, Thai, Japanese, Korean, Chinese.
+- **Customization**: Supports `keyword`, `context`, `tone`, `prefix`, and `suffix` prompts for tailored results.
 - **Input Modes**: JSON (URL) or Binary Upload.
 - **Robustness**: 10MB size limit, Zod validation, CORS enabled.
 - **Stack**: Cloudflare Workers, Hono, TypeScript.
@@ -14,24 +15,32 @@ Generate SEO-optimized metadata (alt text, captions, filenames) for images using
 
 ### 1. `/optimize` (POST)
 Generates a full JSON object with all metadata fields.
-**Query Params**: `?lang=en` (default: en)
+**Query Params**: 
+- `?lang=en` (default: en)
+- Optional overrides: `keyword`, `context`, `tone`, `prefix`, `suffix`
 
 **Example Request:**
 ```bash
-curl -X POST https://your-worker-url/optimize?lang=en \
+curl -X POST "https://your-worker-url/optimize?lang=en&keyword=vintage%20lamp" \
   -H "Content-Type: application/json" \
-  -d '{"url": "https://example.com/image.jpg"}'
+  -d '{
+    "url": "https://example.com/image.jpg",
+    "context": "e-commerce product page",
+    "tone": "enthusiastic",
+    "prefix": "Best Seller:"
+  }'
 ```
 
 **Response:**
 ```json
 {
   "language": "English",
-  "alt-text": "A close up of a cat...",
-  "caption": "Cute cat taking a nap",
+  "alt-text": "Best Seller: A vintage lamp suitable for...",
+  "caption": "Best Seller: Light up your room with this vintage lamp!",
   "description": "...",
-  "filename": "cute-cat-nap.jpg",
-  "focus-keyword": "cat nap"
+  "filename": "vintage-lamp.jpg",
+  "focus-keyword": "vintage lamp",
+  "tags": ["lamp", "vintage", "light", "decor", "home"]
 }
 ```
 

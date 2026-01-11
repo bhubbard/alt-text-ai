@@ -21,8 +21,9 @@ interface OptimizeResponse {
   description?: string;
   filename?: string;
   'focus-keyword'?: string;
+  tags?: string[];
   // Allow for loose matching during parsing before validation
-  [key: string]: string | null | undefined;
+  [key: string]: string | string[] | null | undefined;
 }
 
 const app = new Hono<{ Bindings: CloudflareBindings }>();
@@ -49,32 +50,59 @@ const languages = new Map([
 const MAX_IMAGE_SIZE = 10 * 1024 * 1024; // 10MB
 
 function getExtension(contentType: string): string {
-  if (contentType.includes('png')) return 'png';
-  if (contentType.includes('webp')) return 'webp';
-  if (contentType.includes('gif')) return 'gif';
-  if (contentType.includes('avif')) return 'avif';
-  return 'jpg'; // Default
+  const type = contentType.toLowerCase();
+  if (type.includes('png')) return 'png';
+  if (type.includes('webp')) return 'webp';
+  if (type.includes('gif')) return 'gif';
+  if (type.includes('avif')) return 'avif';
+  if (type.includes('svg')) return 'svg';
+  if (type.includes('bmp')) return 'bmp';
+  return 'jpg'; // Default (covers jpeg)
 }
 
-async function loadImage(c: Context): Promise<{ buffer: ArrayBuffer; contentType: string }> {
-  const contentType = c.req.header('Content-Type') || '';
+interface ImageInput {
+  buffer: ArrayBuffer;
+  contentType: string;
+  keyword?: string;
+  context?: string;
+  prefix?: string;
+  suffix?: string;
+  tone?: string;
+}
+
+async function loadImage(c: Context): Promise<ImageInput> {
+  const rawContentType = c.req.header('Content-Type') || '';
+  const contentType = rawContentType.toLowerCase();
   let buffer: ArrayBuffer;
   let type: string;
+  let keyword: string | undefined = c.req.query('keyword');
+  let context: string | undefined = c.req.query('context');
+  let prefix: string | undefined = c.req.query('prefix');
+  let suffix: string | undefined = c.req.query('suffix');
+  let tone: string | undefined = c.req.query('tone');
 
   if (contentType.includes('application/json')) {
     try {
       const body = await c.req.json();
       const schema = z.object({
         url: z.string().url(),
+        keyword: z.string().optional(),
+        context: z.string().optional(),
+        prefix: z.string().optional(),
+        suffix: z.string().optional(),
+        tone: z.string().optional(),
       });
-      const { url } = schema.parse(body);
+      const parsed = schema.parse(body);
+      const { url } = parsed;
+      // Prefer body values if present, otherwise fall back to query params (parsing logic)
+      if (parsed.keyword) keyword = parsed.keyword;
+      if (parsed.context) context = parsed.context;
+      if (parsed.prefix) prefix = parsed.prefix;
+      if (parsed.suffix) suffix = parsed.suffix;
+      if (parsed.tone) tone = parsed.tone;
 
       if (url.startsWith('https://') || url.startsWith('http://')) {
-        // Double check protocol just in case, though Zod .url() covers valid URI structure, 
-        // it allows other protocols like ftp if not restricted? 
-        // Zod validation is: "https://zod.dev/?id=string" -> url() checks for valid URL.
-        // It does not strictly enforce http/https by default, so we keep the check or add regex.
-        // Actually, let's trust Zod's .url() is good enough for structure, but check protocol specifically.
+        // Double check protocol just in case
       } else {
         throw new Error('Invalid protocol. Only http and https are allowed.');
       }
@@ -91,7 +119,8 @@ async function loadImage(c: Context): Promise<{ buffer: ArrayBuffer; contentType
       if (!imgResponse.ok) {
         throw new Error(`Failed to fetch image: ${imgResponse.statusText}`);
       }
-      const imgType = imgResponse.headers.get('content-type');
+      const rawImgType = imgResponse.headers.get('content-type');
+      const imgType = rawImgType ? rawImgType.toLowerCase() : '';
       if (
         !imgType ||
         (!imgType.startsWith('image/') && !imgType.includes('application/octet-stream'))
@@ -122,7 +151,7 @@ async function loadImage(c: Context): Promise<{ buffer: ArrayBuffer; contentType
     );
   }
 
-  return { buffer, contentType: type };
+  return { buffer, contentType: type, keyword, context, prefix, suffix, tone };
 }
 
 async function runAI<T = string>(
@@ -168,11 +197,11 @@ app.post('/optimize', async (c) => {
   const lang = languages.has(langQuery) ? langQuery : 'en';
 
   try {
-    const { buffer: imgBuffer, contentType } = await loadImage(c);
+    const { buffer: imgBuffer, contentType, keyword, context, prefix, suffix, tone } = await loadImage(c);
     if (!imgBuffer || imgBuffer.byteLength === 0) return c.text('Invalid image data', 400);
 
     const systemPrompt = 'You are an SEO expert. You output valid JSON only.';
-    const userPrompt = `
+    let userPrompt = `
       Analyze the image and generate a structured JSON response with the following fields:
       - "language": The language code used (e.g., "${languages.get(lang)}").
       - "title": A concise, descriptive title for the image (suitable for HTML title attribute).
@@ -181,10 +210,41 @@ app.post('/optimize', async (c) => {
       - "description": A detailed description of the image content.
       - "filename": A short, SEO-friendly filename (lowercase, dashes, no extension).
       - "focus-keyword": The main subject or keyword of the image.
+      - "tags": An array of 5-10 relevant keywords as strings.
 
       Output ONLY valid JSON. No markdown formatting, no code blocks, no intro/outro text.
       Language for all text fields: ${languages.get(lang)}.
     `;
+
+    if (keyword) {
+      userPrompt += `
+      IMPORTANT: Prioritize the keyword "${keyword}" in the 'alt-text', 'filename', and 'focus-keyword' fields.
+      `;
+    }
+
+    if (context) {
+      userPrompt += `
+      Context for this image: ${context}. Adjust the tone and description to fit this context (e.g., if 'product', be descriptive; if 'hero', be evocative).
+      `;
+    }
+
+    if (tone) {
+      userPrompt += `
+      Tone: ${tone}. ensure the 'caption' and 'description' reflect this tone.
+      `;
+    }
+
+    if (prefix) {
+      userPrompt += `
+      Prefix Instructions: Start the 'alt-text', 'caption', and 'description' with "${prefix}" if grammatically possible.
+      `;
+    }
+
+    if (suffix) {
+      userPrompt += `
+      Suffix Instructions: End the 'alt-text', 'caption', and 'description' with "${suffix}".
+      `;
+    }
 
     // Use generic to type the response
     const result = await runAI<OptimizeResponse | string>(c, systemPrompt, userPrompt, imgBuffer);
@@ -224,7 +284,7 @@ app.post('/optimize', async (c) => {
     // Ensure focus-keyword is present (handle potential AI variations like underscore)
     if (!parsedResult['focus-keyword']) {
       parsedResult['focus-keyword'] =
-        parsedResult['focus_keyword'] || parsedResult['keyword'] || undefined;
+        (parsedResult['focus_keyword'] as string) || (parsedResult['keyword'] as string) || undefined;
       // Clean up legacy/malformed keys
       delete parsedResult['focus_keyword'];
       delete parsedResult['keyword'];
@@ -305,11 +365,27 @@ async function handleSingleFieldRequest(
   const lang = languages.has(langQuery) ? langQuery : 'en';
 
   try {
-    const { buffer: imgBuffer } = await loadImage(c);
+    const { buffer: imgBuffer, keyword, context, prefix, suffix, tone } = await loadImage(c);
     if (!imgBuffer || imgBuffer.byteLength === 0) return c.text('Invalid image data', 400);
 
     const systemPrompt = 'You are a helpful assistant.';
-    const userPrompt = `${promptInstruction} Language: ${languages.get(lang)}.`;
+    let userPrompt = `${promptInstruction} Language: ${languages.get(lang)}.`;
+
+    if (keyword) {
+      userPrompt += ` Consider the keyword "${keyword}" in your response.`;
+    }
+    if (context) {
+      userPrompt += ` Context: ${context}.`;
+    }
+    if (tone) {
+      userPrompt += ` Tone: ${tone}.`;
+    }
+    if (prefix) {
+      userPrompt += ` Start the text with "${prefix}".`;
+    }
+    if (suffix) {
+      userPrompt += ` End the text with "${suffix}".`;
+    }
 
     // Request a string response
     const result = await runAI<string>(c, systemPrompt, userPrompt, imgBuffer);
@@ -330,17 +406,24 @@ async function handleSingleFieldRequest(
  */
 app.post('/filename', async (c) => {
   try {
-    const { buffer: imgBuffer, contentType } = await loadImage(c);
+    const { buffer: imgBuffer, contentType, keyword, context } = await loadImage(c);
     if (!imgBuffer || imgBuffer.byteLength === 0) return c.text('Invalid image data', 400);
 
     const systemPrompt = 'You are a helpful assistant that generates SEO-friendly filenames.';
-    const userPrompt = `
+    let userPrompt = `
           Generate a short, descriptive filename for this image. 
           It should be 3-5 words long, describing the main subject.
           Output ONLY the filename as space-separated words.
           Do NOT include the file extension.
           Do NOT use underscores or dashes, just spaces.
         `;
+
+    if (keyword) {
+      userPrompt += ` Ensure the filename includes the keyword: "${keyword}".`;
+    }
+    if (context) {
+      userPrompt += ` Context: ${context}.`;
+    }
 
     // Expect string
     const result = await runAI<string>(c, systemPrompt, userPrompt, imgBuffer);
