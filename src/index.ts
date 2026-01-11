@@ -1,4 +1,7 @@
 import { Hono, Context } from 'hono';
+import { cors } from 'hono/cors';
+import { logger } from 'hono/logger';
+import { z } from 'zod';
 
 // Define Cloudflare AI Binding Interface
 interface Ai {
@@ -22,6 +25,10 @@ interface OptimizeResponse {
 }
 
 const app = new Hono<{ Bindings: CloudflareBindings }>();
+
+// Middleware
+app.use('*', logger());
+app.use('/*', cors());
 
 // This Map contains the supported languages by the AI model.
 const languages = new Map([
@@ -54,17 +61,32 @@ async function loadImage(c: Context): Promise<{ buffer: ArrayBuffer; contentType
   let type: string;
 
   if (contentType.includes('application/json')) {
-    const body = await c.req.json();
-    if (!body.url) {
-      throw new Error('Invalid request body: "url" is required');
-    }
-
     try {
-      const url = new URL(body.url);
-      if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+      const body = await c.req.json();
+      const schema = z.object({
+        url: z.string().url(),
+      });
+      const { url } = schema.parse(body);
+
+      if (url.startsWith('https://') || url.startsWith('http://')) {
+        // Double check protocol just in case, though Zod .url() covers valid URI structure, 
+        // it allows other protocols like ftp if not restricted? 
+        // Zod validation is: "https://zod.dev/?id=string" -> url() checks for valid URL.
+        // It does not strictly enforce http/https by default, so we keep the check or add regex.
+        // Actually, let's trust Zod's .url() is good enough for structure, but check protocol specifically.
+      } else {
+        throw new Error('Invalid protocol. Only http and https are allowed.');
+      }
+
+      // We still use URL object for strict protocol check or rely on regex
+      // Note: schema.parse throws ZodError if invalid.
+
+      const parsedUrl = new URL(url);
+      if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
         throw new Error('Invalid protocol');
       }
-      const imgResponse = await fetch(url.toString());
+
+      const imgResponse = await fetch(url);
       if (!imgResponse.ok) {
         throw new Error(`Failed to fetch image: ${imgResponse.statusText}`);
       }
@@ -78,6 +100,10 @@ async function loadImage(c: Context): Promise<{ buffer: ArrayBuffer; contentType
       buffer = await imgResponse.arrayBuffer();
       type = imgType;
     } catch (e: unknown) {
+      // Handle Zod Error specifically for better messages?
+      if (e instanceof z.ZodError) {
+        throw new Error(`Invalid Input: ${e.errors.map((err: z.ZodIssue) => err.message).join(', ')}`);
+      }
       const msg = e instanceof Error ? e.message : 'Invalid URL provided';
       throw new Error(msg);
     }
