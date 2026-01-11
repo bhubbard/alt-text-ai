@@ -248,9 +248,9 @@ app.post('/filename', async (c) => {
     const filename = (textResult as string)
       .trim()
       .toLowerCase()
-      .replace(/[^a-z0-9\s]/g, '')
-      .replace(/\s+/g, '-')
-      .replace(/-+/g, '-');
+      .replace(/[^a-z0-9\s-]/g, '')  // Allow dashes
+      .replace(/\s+/g, '-')         // Replace spaces with dashes
+      .replace(/-+/g, '-');         // Remove duplicate dashes
 
     return c.json({ result: `${filename}.${ext}` });
 
