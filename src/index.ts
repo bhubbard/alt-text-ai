@@ -2,7 +2,7 @@ import { Hono, Context } from 'hono';
 
 // Define Cloudflare AI Binding Interface
 interface Ai {
-  run(model: string, inputs: { messages: any[]; image?: number[] | number[][] }): Promise<any>;
+  run(model: string, inputs: { messages: { role: string; content: string }[]; image?: number[] | number[][] }): Promise<unknown>;
 }
 
 interface CloudflareBindings {
@@ -18,7 +18,7 @@ interface OptimizeResponse {
   filename?: string;
   'focus-keyword'?: string;
   // Allow for loose matching during parsing before validation
-  [key: string]: any;
+  [key: string]: string | null | undefined;
 }
 
 const app = new Hono<{ Bindings: CloudflareBindings }>();
@@ -77,8 +77,9 @@ async function loadImage(c: Context): Promise<{ buffer: ArrayBuffer; contentType
       }
       buffer = await imgResponse.arrayBuffer();
       type = imgType;
-    } catch (e: any) {
-      throw new Error(e.message || 'Invalid URL provided');
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : 'Invalid URL provided';
+      throw new Error(msg);
     }
   } else if (contentType.includes('application/octet-stream') || contentType.startsWith('image/')) {
     buffer = await c.req.arrayBuffer();
@@ -119,7 +120,8 @@ async function runAI<T = string>(
   }
 
   // Standard response wrapper
-  const rawResponse = aiResponse?.response;
+  // Safe cast because we checked it's an object above, or we just treat it as unknown for property access
+  const rawResponse = (aiResponse as { response?: unknown })?.response;
 
   // Handle if nested response is object
   if (typeof rawResponse === 'object' && rawResponse !== null) {
@@ -175,7 +177,7 @@ app.post('/optimize', async (c) => {
 
       try {
         parsedResult = JSON.parse(responseText);
-      } catch (e) {
+      } catch {
         throw new Error(
           `AI generation failed to produce valid JSON. Raw output: ${responseText.substring(0, 500)}`
         );
@@ -194,16 +196,17 @@ app.post('/optimize', async (c) => {
     // Ensure focus-keyword is present (handle potential AI variations like underscore)
     if (!parsedResult['focus-keyword']) {
       parsedResult['focus-keyword'] =
-        parsedResult['focus_keyword'] || parsedResult['keyword'] || null;
+        parsedResult['focus_keyword'] || parsedResult['keyword'] || undefined;
       // Clean up legacy/malformed keys
       delete parsedResult['focus_keyword'];
       delete parsedResult['keyword'];
     }
 
     return c.json(parsedResult);
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Error in /optimize:', error);
-    return c.json({ error: error.message }, 500);
+    const msg = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: msg }, 500);
   }
 });
 
@@ -275,9 +278,10 @@ async function handleSingleFieldRequest(
     const textResult = typeof result === 'object' ? JSON.stringify(result) : result;
 
     return c.json({ result: textResult });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error(`Error in /${fieldName}:`, error);
-    return c.json({ error: error.message }, 500);
+    const msg = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: msg }, 500);
   }
 }
 
@@ -314,9 +318,10 @@ app.post('/filename', async (c) => {
       .replace(/-+/g, '-');
 
     return c.json({ result: `${filename}.${ext}` });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Error in /filename:', error);
-    return c.json({ error: error.message }, 500);
+    const msg = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: msg }, 500);
   }
 });
 
