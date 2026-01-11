@@ -15,6 +15,7 @@ interface CloudflareBindings {
 // Define expected response structure
 interface OptimizeResponse {
   language?: string;
+  title?: string;
   'alt-text'?: string;
   caption?: string;
   description?: string;
@@ -174,6 +175,7 @@ app.post('/optimize', async (c) => {
     const userPrompt = `
       Analyze the image and generate a structured JSON response with the following fields:
       - "language": The language code used (e.g., "${languages.get(lang)}").
+      - "title": A concise, descriptive title for the image (suitable for HTML title attribute).
       - "alt-text": A concise, SEO-optimized alt text (under 125 chars).
       - "caption": A short, engaging caption for social media.
       - "description": A detailed description of the image content.
@@ -244,6 +246,17 @@ app.post('/alt-text', async (c) => {
     c,
     'alt-text',
     'Generate a concise, SEO-optimized alt text for this image. Under 125 characters. Output ONLY the text.'
+  );
+});
+
+/**
+ * POST /title
+ */
+app.post('/title', async (c) => {
+  return handleSingleFieldRequest(
+    c,
+    'title',
+    'Generate a concise, descriptive title for this image suitable for an HTML title attribute. Output ONLY the text.'
   );
 });
 

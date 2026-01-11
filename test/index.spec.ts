@@ -13,6 +13,7 @@ describe('Worker Tests', () => {
     response: JSON.stringify({
       language: 'English',
       'alt-text': 'A test image',
+      title: 'Test Title',
       caption: 'Test Caption',
       description: 'Test Description',
       filename: 'test-image',
@@ -65,6 +66,7 @@ describe('Worker Tests', () => {
           const json = (await response.json()) as any;
 
           expect(json).toHaveProperty('alt-text');
+          expect(json).toHaveProperty('title');
           expect(json).toHaveProperty('filename');
           expect(json.filename.endsWith(`.${ext}`)).toBe(true);
         });
@@ -146,6 +148,26 @@ describe('Worker Tests', () => {
           expect(json.result).toBe(`generated-filename-binary.${ext}`);
         });
       });
+    });
+  });
+  describe('/title', () => {
+    it('should return a title for the image', async () => {
+      // @ts-ignore
+      env.AI.run.mockResolvedValueOnce({ response: 'Generated Title' });
+
+      const request = new Request('http://example.com/title', {
+        method: 'POST',
+        body: new ArrayBuffer(10),
+        headers: { 'Content-Type': 'image/jpeg' },
+      });
+
+      const ctx = createExecutionContext();
+      const response = await worker.fetch(request, env, ctx);
+      await waitOnExecutionContext(ctx);
+
+      expect(response.status).toBe(200);
+      const json = (await response.json()) as any;
+      expect(json.result).toBe('Generated Title');
     });
   });
 });
