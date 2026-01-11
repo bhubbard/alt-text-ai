@@ -17,6 +17,14 @@ const languages = new Map([
   ['zh', 'Chinese'],
 ]);
 
+function getExtension(contentType: string): string {
+  if (contentType.includes('png')) return 'png';
+  if (contentType.includes('webp')) return 'webp';
+  if (contentType.includes('gif')) return 'gif';
+  if (contentType.includes('avif')) return 'avif';
+  return 'jpg'; // Default
+}
+
 async function loadImage(c: Context): Promise<{ buffer: ArrayBuffer; contentType: string }> {
   const contentType = c.req.header('Content-Type') || '';
 
@@ -95,7 +103,7 @@ app.post('/optimize', async (c) => {
   const lang = languages.has(langQuery) ? langQuery : 'en';
 
   try {
-    const { buffer: imgBuffer } = await loadImage(c);
+    const { buffer: imgBuffer, contentType } = await loadImage(c);
     if (!imgBuffer || imgBuffer.byteLength === 0) return c.text('Invalid image data', 400);
 
     const systemPrompt = 'You are an SEO expert. You output valid JSON only.';
@@ -114,24 +122,44 @@ app.post('/optimize', async (c) => {
 
     const result = await runAI(c, systemPrompt, userPrompt, imgBuffer);
 
+    let parsedResult: any;
+
     // If result is already an object, return it (likely handled by runAI for direct object responses)
     if (typeof result === 'object') {
-      return c.json(result);
+      parsedResult = result;
+    } else {
+      // Parse string result with robust extraction
+      let responseText = result as string;
+      const jsonStart = responseText.indexOf('{');
+      const jsonEnd = responseText.lastIndexOf('}');
+      if (jsonStart !== -1 && jsonEnd !== -1) {
+        responseText = responseText.substring(jsonStart, jsonEnd + 1);
+      }
+
+      try {
+        parsedResult = JSON.parse(responseText);
+      } catch (e) {
+        throw new Error(`AI generation failed to produce valid JSON. Raw output: ${responseText.substring(0, 500)}`);
+      }
     }
 
-    // Parse string result with robust extraction
-    let responseText = result as string;
-    const jsonStart = responseText.indexOf('{');
-    const jsonEnd = responseText.lastIndexOf('}');
-    if (jsonStart !== -1 && jsonEnd !== -1) {
-      responseText = responseText.substring(jsonStart, jsonEnd + 1);
+    // Append extension to filename if present
+    if (parsedResult.filename) {
+      const ext = getExtension(contentType);
+      // Ensure we don't double append if AI somehow added it
+      if (!parsedResult.filename.endsWith(`.${ext}`)) {
+        parsedResult.filename = `${parsedResult.filename}.${ext}`;
+      }
     }
 
-    try {
-      return c.json(JSON.parse(responseText));
-    } catch (e) {
-      throw new Error(`AI generation failed to produce valid JSON. Raw output: ${responseText.substring(0, 500)}`);
+    // Ensure focus-keyword is present (handle potential AI variations like underscore)
+    if (!parsedResult['focus-keyword']) {
+      parsedResult['focus-keyword'] = parsedResult['focus_keyword'] || parsedResult['keyword'] || null;
+      delete parsedResult['focus_keyword']; // Clean up if it was there
+      delete parsedResult['keyword'];
     }
+
+    return c.json(parsedResult);
 
   } catch (error: any) {
     console.error('Error in /optimize:', error);
@@ -214,13 +242,9 @@ app.post('/filename', async (c) => {
     const result = await runAI(c, systemPrompt, userPrompt, imgBuffer);
     const textResult = typeof result === 'object' ? JSON.stringify(result) : result; // Should be string
 
-    // Determine extension
-    let extension = 'jpg';
-    if (contentType.includes('png')) extension = 'png';
-    else if (contentType.includes('webp')) extension = 'webp';
-    else if (contentType.includes('gif')) extension = 'gif';
+    const ext = getExtension(contentType);
 
-    // Post-processing
+    // Post-processing for SEO filename
     const filename = (textResult as string)
       .trim()
       .toLowerCase()
@@ -228,7 +252,7 @@ app.post('/filename', async (c) => {
       .replace(/\s+/g, '-')
       .replace(/-+/g, '-');
 
-    return c.json({ result: `${filename}.${extension}` });
+    return c.json({ result: `${filename}.${ext}` });
 
   } catch (error: any) {
     console.error('Error in /filename:', error);
