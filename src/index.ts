@@ -1,5 +1,26 @@
 import { Hono, Context } from 'hono';
 
+// Define Cloudflare AI Binding Interface
+interface Ai {
+  run(model: string, inputs: { messages: any[]; image?: number[] | number[][] }): Promise<any>;
+}
+
+interface CloudflareBindings {
+  AI: Ai;
+}
+
+// Define expected response structure
+interface OptimizeResponse {
+  language?: string;
+  'alt-text'?: string;
+  caption?: string;
+  description?: string;
+  filename?: string;
+  'focus-keyword'?: string;
+  // Allow for loose matching during parsing before validation
+  [key: string]: any;
+}
+
 const app = new Hono<{ Bindings: CloudflareBindings }>();
 
 // This Map contains the supported languages by the AI model.
@@ -17,6 +38,8 @@ const languages = new Map([
   ['zh', 'Chinese'],
 ]);
 
+const MAX_IMAGE_SIZE = 10 * 1024 * 1024; // 10MB
+
 function getExtension(contentType: string): string {
   if (contentType.includes('png')) return 'png';
   if (contentType.includes('webp')) return 'webp';
@@ -27,6 +50,8 @@ function getExtension(contentType: string): string {
 
 async function loadImage(c: Context): Promise<{ buffer: ArrayBuffer; contentType: string }> {
   const contentType = c.req.header('Content-Type') || '';
+  let buffer: ArrayBuffer;
+  let type: string;
 
   if (contentType.includes('application/json')) {
     const body = await c.req.json();
@@ -44,54 +69,65 @@ async function loadImage(c: Context): Promise<{ buffer: ArrayBuffer; contentType
         throw new Error(`Failed to fetch image: ${imgResponse.statusText}`);
       }
       const imgType = imgResponse.headers.get('content-type');
-      if (!imgType || (!imgType.startsWith('image/') && !imgType.includes('application/octet-stream'))) {
+      if (
+        !imgType ||
+        (!imgType.startsWith('image/') && !imgType.includes('application/octet-stream'))
+      ) {
         throw new Error('Fetched URL is not a valid image');
       }
-      return {
-        buffer: await imgResponse.arrayBuffer(),
-        contentType: imgType
-      };
+      buffer = await imgResponse.arrayBuffer();
+      type = imgType;
     } catch (e: any) {
       throw new Error(e.message || 'Invalid URL provided');
     }
-  } else if (
-    contentType.includes('application/octet-stream') ||
-    contentType.startsWith('image/')
-  ) {
-    return {
-      buffer: await c.req.arrayBuffer(),
-      contentType: contentType
-    };
+  } else if (contentType.includes('application/octet-stream') || contentType.startsWith('image/')) {
+    buffer = await c.req.arrayBuffer();
+    type = contentType;
   } else {
     throw new Error('Invalid content type. Expected application/json or image binary');
   }
+
+  // Size Limit Check
+  if (buffer.byteLength > MAX_IMAGE_SIZE) {
+    throw new Error(
+      `Image size exceeds limit of 10MB. Received: ${(buffer.byteLength / 1024 / 1024).toFixed(2)}MB`
+    );
+  }
+
+  return { buffer, contentType: type };
 }
 
-async function runAI(c: Context, systemPrompt: string, userPrompt: string, imgBuffer: ArrayBuffer) {
+async function runAI<T = string>(
+  c: Context<{ Bindings: CloudflareBindings }>,
+  systemPrompt: string,
+  userPrompt: string,
+  imgBuffer: ArrayBuffer
+): Promise<T> {
   const messages = [
     { role: 'system', content: systemPrompt },
     { role: 'user', content: userPrompt },
   ];
 
-  const aiResponse = await c.env.AI.run(
-    // @ts-ignore - Beta binding
-    '@cf/meta/llama-3.2-11b-vision-instruct',
-    {
-      messages,
-      image: Array.from(new Uint8Array(imgBuffer)),
-    }
-  );
+  const aiResponse = await c.env.AI.run('@cf/meta/llama-3.2-11b-vision-instruct', {
+    messages,
+    image: Array.from(new Uint8Array(imgBuffer)),
+  });
 
-  // @ts-ignore
-  const rawResponse = aiResponse.response;
+  // Handle direct object response (if the binding returns structured data directly)
+  if (aiResponse && typeof aiResponse === 'object' && !('response' in aiResponse)) {
+    return aiResponse as T;
+  }
 
-  // Handle direct object response
+  // Standard response wrapper
+  const rawResponse = aiResponse?.response;
+
+  // Handle if nested response is object
   if (typeof rawResponse === 'object' && rawResponse !== null) {
-    return rawResponse;
+    return rawResponse as T;
   }
 
   // Handle string response
-  return String(rawResponse || '').trim();
+  return String(rawResponse || '').trim() as unknown as T;
 }
 
 /**
@@ -120,13 +156,14 @@ app.post('/optimize', async (c) => {
       Language for all text fields: ${languages.get(lang)}.
     `;
 
-    const result = await runAI(c, systemPrompt, userPrompt, imgBuffer);
+    // Use generic to type the response
+    const result = await runAI<OptimizeResponse | string>(c, systemPrompt, userPrompt, imgBuffer);
 
-    let parsedResult: any;
+    let parsedResult: OptimizeResponse;
 
-    // If result is already an object, return it (likely handled by runAI for direct object responses)
+    // If result is already an object, allow it
     if (typeof result === 'object') {
-      parsedResult = result;
+      parsedResult = result as OptimizeResponse;
     } else {
       // Parse string result with robust extraction
       let responseText = result as string;
@@ -139,7 +176,9 @@ app.post('/optimize', async (c) => {
       try {
         parsedResult = JSON.parse(responseText);
       } catch (e) {
-        throw new Error(`AI generation failed to produce valid JSON. Raw output: ${responseText.substring(0, 500)}`);
+        throw new Error(
+          `AI generation failed to produce valid JSON. Raw output: ${responseText.substring(0, 500)}`
+        );
       }
     }
 
@@ -154,13 +193,14 @@ app.post('/optimize', async (c) => {
 
     // Ensure focus-keyword is present (handle potential AI variations like underscore)
     if (!parsedResult['focus-keyword']) {
-      parsedResult['focus-keyword'] = parsedResult['focus_keyword'] || parsedResult['keyword'] || null;
-      delete parsedResult['focus_keyword']; // Clean up if it was there
+      parsedResult['focus-keyword'] =
+        parsedResult['focus_keyword'] || parsedResult['keyword'] || null;
+      // Clean up legacy/malformed keys
+      delete parsedResult['focus_keyword'];
       delete parsedResult['keyword'];
     }
 
     return c.json(parsedResult);
-
   } catch (error: any) {
     console.error('Error in /optimize:', error);
     return c.json({ error: error.message }, 500);
@@ -171,34 +211,54 @@ app.post('/optimize', async (c) => {
  * POST /alt-text
  */
 app.post('/alt-text', async (c) => {
-  return handleSingleFieldRequest(c, 'alt-text', 'Generate a concise, SEO-optimized alt text for this image. Under 125 characters. Output ONLY the text.');
+  return handleSingleFieldRequest(
+    c,
+    'alt-text',
+    'Generate a concise, SEO-optimized alt text for this image. Under 125 characters. Output ONLY the text.'
+  );
 });
 
 /**
  * POST /caption
  */
 app.post('/caption', async (c) => {
-  return handleSingleFieldRequest(c, 'caption', 'Generate a short, engaging caption for this image suitable for social media. Output ONLY the text.');
+  return handleSingleFieldRequest(
+    c,
+    'caption',
+    'Generate a short, engaging caption for this image suitable for social media. Output ONLY the text.'
+  );
 });
 
 /**
  * POST /description
  */
 app.post('/description', async (c) => {
-  return handleSingleFieldRequest(c, 'description', 'Generate a detailed description of the image content. Output ONLY the text.');
+  return handleSingleFieldRequest(
+    c,
+    'description',
+    'Generate a detailed description of the image content. Output ONLY the text.'
+  );
 });
 
 /**
  * POST /focus-keyword
  */
 app.post('/focus-keyword', async (c) => {
-  return handleSingleFieldRequest(c, 'focus-keyword', 'Identify the main subject or focus keyword of this image. Output ONLY the keyword/phrase.');
+  return handleSingleFieldRequest(
+    c,
+    'focus-keyword',
+    'Identify the main subject or focus keyword of this image. Output ONLY the keyword/phrase.'
+  );
 });
 
 /**
  * Helper for single field endpoints
  */
-async function handleSingleFieldRequest(c: Context, fieldName: string, promptInstruction: string) {
+async function handleSingleFieldRequest(
+  c: Context<{ Bindings: CloudflareBindings }>,
+  fieldName: string,
+  promptInstruction: string
+) {
   const langQuery = c.req.query('lang') || 'en';
   const lang = languages.has(langQuery) ? langQuery : 'en';
 
@@ -209,9 +269,9 @@ async function handleSingleFieldRequest(c: Context, fieldName: string, promptIns
     const systemPrompt = 'You are a helpful assistant.';
     const userPrompt = `${promptInstruction} Language: ${languages.get(lang)}.`;
 
-    const result = await runAI(c, systemPrompt, userPrompt, imgBuffer);
+    // Request a string response
+    const result = await runAI<string>(c, systemPrompt, userPrompt, imgBuffer);
 
-    // If it's an object (unexpected for plain text prompt but possible), stringify it
     const textResult = typeof result === 'object' ? JSON.stringify(result) : result;
 
     return c.json({ result: textResult });
@@ -239,8 +299,9 @@ app.post('/filename', async (c) => {
           Do NOT use underscores or dashes, just spaces.
         `;
 
-    const result = await runAI(c, systemPrompt, userPrompt, imgBuffer);
-    const textResult = typeof result === 'object' ? JSON.stringify(result) : result; // Should be string
+    // Expect string
+    const result = await runAI<string>(c, systemPrompt, userPrompt, imgBuffer);
+    const textResult = typeof result === 'object' ? JSON.stringify(result) : result;
 
     const ext = getExtension(contentType);
 
@@ -248,12 +309,11 @@ app.post('/filename', async (c) => {
     const filename = (textResult as string)
       .trim()
       .toLowerCase()
-      .replace(/[^a-z0-9\s-]/g, '')  // Allow dashes
-      .replace(/\s+/g, '-')         // Replace spaces with dashes
-      .replace(/-+/g, '-');         // Remove duplicate dashes
+      .replace(/[^a-z0-9\s-]/g, '')
+      .replace(/\s+/g, '-')
+      .replace(/-+/g, '-');
 
     return c.json({ result: `${filename}.${ext}` });
-
   } catch (error: any) {
     console.error('Error in /filename:', error);
     return c.json({ error: error.message }, 500);
