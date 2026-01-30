@@ -353,6 +353,18 @@ app.post('/focus-keyword', async (c) => {
   );
 });
 
+app.post('/agree', async (c) => {
+  await c.env.AI.run(
+    // @ts-ignore
+    '@cf/meta/llama-3.2-11b-vision-instruct',
+    {
+      prompt: 'agree',
+    }
+  );
+
+  return c.json({ result: 'success' });
+});
+
 /**
  * Helper for single field endpoints
  */
